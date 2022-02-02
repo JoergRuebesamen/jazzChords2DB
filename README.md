@@ -1,5 +1,5 @@
 # jazzChords2DB
- read jazz chord changes into a database
+ Read jazz chord changes and store them into a database.
  Many even longer chord patterns in jazz standards are widely reused in other songs.
  I want to be able to identify those similarities regardless of the original key of the score.
  For that I reduce the color and complexety of the chords in the scores and store them in simpler 
