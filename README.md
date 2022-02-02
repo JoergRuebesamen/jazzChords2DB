@@ -12,7 +12,14 @@
  Slash idler get replaced by the preceding chord.
  Repeated chords in one measure get skipped.
  Sadly the number of accidentals that leads to the songs key is not alway filled reliably.
- In some cases that is easy to fix, in others not.
+ In some cases that is easy to fix, in others not. Therfore currently for every song a 
+ plausibility check is called and if it's not obvious that the nuber of accidentals are correct,
+ an editor is called with the current song loaded, giving the option to edit this info. But the changes will not effect before the next run.
+ Currently the next run stores the song a second time, there is no update implemented. So it may be a good idea to delete the chord database before running a second time.
+ TODO: I should add an option to skip the plausibilit check, at the time beeing you would have to comment this line out:
+ 
+ ParseLeadSheetFile.check_plausibility(ParseLeadSheetFile.number_of_accidentals,
+                                                          roman_numeric_interpretation)
 
 # Search for similarities:
  quite good examples:
