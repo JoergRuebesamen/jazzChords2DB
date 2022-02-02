@@ -2,11 +2,12 @@
  read jazz chord changes into a database
  Many even longer chord patterns in jazz standards are widely reused in other songs.
  I want to be able to identify those similarities regardless of the original key of the score.
- For that I reduce the color and complexety of the scores and store them in simpler 
+ For that I reduce the color and complexety of the chords in the scores and store them in simpler 
  key independent versions inspired by Roman Numeral Notation in addition to the original changes.
 
  Input is currently a directory with community maintained lead sheets in IMPROVISOR's ls format.
  see https://www.cs.hmc.edu/~keller/jazz/improvisor/
+ There are roughly tree thousand songs at the moment.
 
  Slash idler get replaced by the preceding chord.
  Repeated chords in one measure get skipped.
