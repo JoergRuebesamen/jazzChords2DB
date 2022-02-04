@@ -1,0 +1,501 @@
+# Reads changes from lead sheet in IMPROVISOR's ls format,
+# simplifies the chords und converts them into some sort of Roman Notation.
+# This way scores get independent from key signature and comparable.
+# Slash idler get replaced by the preceding chord.
+# Repeated chords in one measure get skipped.
+# Sadly the info number of accidentals is not filled reliably
+
+# quite good examples:
+# Ladybird - Half Nelson
+# Rose Room - In a Mellow Tone
+# select Title, Composer from jazz_changes where    sri like  "%I #Idim | IIm V7 | IIm V7 | I |%";
+# select Title, Composer from jazz_changes where ssri1l like  "%IIm | V7 | I | IV |%";
+# select Title, Composer from jazz_changes where ssri1l like  "%I | IIIm | IIm | IIm |%";
+# select Title, Composer, changes from jazz_changes where ssri1l like  "%I | I | Vm | I7 | IV | IV | bVII7 | bVII7 | I | I | II7 | II7 | IIm | VI7 | IIm | V7 |%";
+
+# currently bad examples
+# Lullaby of Birdland - Love Me or Leave Me
+
+
+# todo: test with pypy10
+# todo: further simplification eg IIIm = v7 ?
+# todo: try to use music21
+import glob  # used for iterating over all files in a directory
+import sqlite3  # used for persisting the changes in a database
+import uuid
+import os
+from subprocess import call
+
+
+class Chord:
+    """  Class to provide different representations of a given chord."""
+    VALID_MODIFIER = ("b", "#")  # may follow a note name
+    NOTE_NAMES = ('C', 'D', 'E', 'F', 'G', 'A', 'B')
+
+    ROMANS = {"0": "I", "1": "#I", "2": "II", "3": "bIII", "4": "III",  # interpretation as f(distance to c)
+              "5": "IV", "6": "#IV", "7": "V", "8": "#V", "9": "VI",  # might not be musically correct
+              "10": "bVII", "11": "VII"}  # but consistent
+
+    DISTANCE_TO_C = {'B#': 0, 'C': 0, 'C#': 1, 'Db': 1, 'D': 2, 'D#': 3, 'Eb': 3, 'E': 4,
+                     'G': 7, 'G#': 8, 'Fb': 4, 'E#': 5, 'F': 5, 'F#': 6, 'Gb': 6,
+                     'Ab': 8, 'A': 9, 'A#': 10, 'Bb': 10, 'B': 11, 'Cb': 11, 'NC': 0}  # distance to C
+
+    MINOR_CHORDS = ("m7", "m6", "m67", "m9", "m#5", "m+", "m11#5", "m", "m7add11",
+                    "m11", "m11b5", "m13", "m69", "m7#5", "m7", "m9#5", "mMaj7",
+                    "m9b5", "mM7", "mM7b6", "mM9", "madd9", "mb6", "mb6M7", "mb6b9", "m7add11", "m7add4")
+    MAJOR_CHORDS = ("M", "2", "5", "6", "69", "6#11", "69#11", "6b5",
+                    "M13", "M13#11", "maj13", "Maj13", "maj13#11", "Maj13#11",
+                    "M6", "M6#11", "M6b5", "M69#11", "M69", "M7#11", "M7", "maj7", "Maj7",
+                    "maj7#11", "Maj7#11", "M7add13", "M7b5", "M7b6", "M7b9", "M9", "M9#11",
+                    "maj9", "Maj9", "maj9#11", "Maj9#11", "M9b5", "Madd9", "Mb5", "Mb6", "add2",
+                    "add9", "add9no3", "M7#9#11", "madd4", "addb9")
+    DIMINISHED_CHORDS = ("dim", "o", "dim7", "o7", "oM7", "o7M7", "m7b5", "h", "h7", "mb5")
+    DOMINANT_CHORDS = ("7", "79", "7#5", "7+", "aug7", "7aug", "7#5#9", "7alt", "7b13", "7b5#9",
+                       "7b5", "7b5b13", "7b5b9", "7b5b9b13", "7b6", "7b9#11", "7b9#11b13", "7b9",
+                       "7b9b13#11", "7b9b13", "7no5", "7#11", "7#11b13", "7#5b9#11", "7#5b9",
+                       "7#9#11", "7#9#11b13", "7#9", "7#9b13", "9", "9#5", "9+", "9#11",
+                       "9#11b13", "9#5#11", "9b13", "9b5", "9b5b13", "9no5", "13#11", "13#9#11",
+                       "13#9", "13", "13b5", "13b9#11", "13b9", "67", "7add6", "7add13", "7#4")
+    SUSPENDED_CHORDS = ("sus", "sus9", "Msus2", "Msus4", "sus2", "sus24", "sus4", "sus4add9", "susb9", "4",
+                        "quartal", "7b9b13sus4", "7b9sus", "7b9sus4", "7b9sus4", "7sus", "7sus4",
+                        "7sus4b9", "7sus4b9b13", "7susb9", "9sus4", "9sus", "11", "13sus", "13sus4")
+    AUGMENTED_CHORDS = {"M#5", "+", "aug", "+7", "M#5add9", "M7#5", "M7+", "M9#5", "+add9", "+add#9", "maj7#5"}
+    IGNORE_ODD_FLAVOURS = {"Bass", "phryg"}  # source file might contain flavours that can't be interpreted: skip them
+
+    SLASH = "/"
+    BACKSLASH = "\\"
+    NO_CHORD = "NC"
+    NO_FLAVOUR = "??"
+
+    last_chord = "*LAST-CHORD-ERROR*"
+
+    @staticmethod
+    def get_roman_number(a_chord, song_key, current_filename):
+        """ Returns some sort of roman numeral representation of a given chord
+            in relation to a given number of accidentals.
+            Negative numbers ar flats, positive numbers are sharps.
+            First the chord gets simplified. Then the relation to the major code
+            that is represented by the number of accidentals.
+            The roman numeral representation may not be musically correct but is consistent."""
+        if a_chord == Chord.SLASH:
+            return Chord.SLASH
+        current_root = Chord.get_root(a_chord, current_filename)
+        if current_root == "NC":
+            Chord.last_chord = current_root
+            return current_root
+        else:
+            current_chord_flavour = Chord.get_simplified_chord_flavour(a_chord, current_filename)
+            distance = Chord.get_distance(current_root, song_key)
+            roman = Chord.ROMANS[str(distance)] + current_chord_flavour
+            return roman
+
+    @staticmethod
+    def get_root(a_chord, current_filename):
+        """ returns the root of a given Chord as a string of length 1 or 2 """
+        if a_chord == "NC":
+            return a_chord
+        if Chord.NOTE_NAMES.__contains__(a_chord[0]):
+            if len(a_chord) == 1:  # chord name consists only of on Character without flavour
+                return a_chord[0]
+            if Chord.VALID_MODIFIER.__contains__(a_chord[1]):
+                return a_chord[0:2]
+            else:
+                return a_chord[0]
+        else:
+            print("!NaC! - chord not recognized: " + a_chord + ": " + current_filename)
+            return "NC"
+
+    @staticmethod
+    def get_simplified_chord_flavour(a_chord, current_filename):  # static
+        """Returns simplified chord flavour of given maybe more complicated chord.
+        Possible return values are Root + {"", "m", "dim", "sus" and "7", "aug"} """
+        len_root = len(Chord.get_root(a_chord, current_filename))
+        if len(a_chord) == len_root:
+            return ""
+        chord_flavour = a_chord[len_root:]
+
+        # clean up for _-suffix - don't know what this is for
+        if chord_flavour.endswith("_"):
+            chord_flavour = chord_flavour[0:(len(chord_flavour) - 1)]
+        # remove /bass note
+        position = chord_flavour.find(Chord.SLASH)
+
+        if position >= 0:
+            flavour_list = chord_flavour.split(Chord.SLASH)
+            a_flavour = flavour_list[0]
+            if a_flavour == "":
+                return a_flavour
+        # maybe this interpretation is wrong
+        # X\Y should be read as X chord over Y chord - here it will be interpreted as chord X
+        position = chord_flavour.find(Chord.BACKSLASH)
+        if position >= 0:
+            flavour_list = chord_flavour.split(Chord.BACKSLASH)
+            a_flavour = flavour_list[0]
+            if a_flavour == "":
+                return a_flavour
+        # clean up for _-suffix - don't know what this is for
+        if chord_flavour.endswith("_"):
+            chord_flavour = chord_flavour[0:(len(chord_flavour) - 1)]
+        # remove /bass note
+        position_slash = chord_flavour.find("/")
+        if position_slash == 0 and len(chord_flavour) == 2:
+            return ""  # major chord without flavour  but slash base note
+        if position_slash > 0:
+            flavour_list = chord_flavour.split("/")
+            chord_flavour = flavour_list[0]
+        if Chord.MINOR_CHORDS.__contains__(chord_flavour):
+            return "m"
+        if Chord.MAJOR_CHORDS.__contains__(chord_flavour):
+            return ""
+        if Chord.DOMINANT_CHORDS.__contains__(chord_flavour):
+            return "7"
+        if Chord.DIMINISHED_CHORDS.__contains__(chord_flavour):
+            return "dim"
+        if Chord.SUSPENDED_CHORDS.__contains__(chord_flavour):
+            return "sus"
+        if Chord.AUGMENTED_CHORDS.__contains__(chord_flavour):
+            return "aug"
+        if Chord.IGNORE_ODD_FLAVOURS.__contains__(chord_flavour):
+            return ""
+        print(Chord.NO_FLAVOUR + ":" + chord_flavour + ": " + current_filename)
+        return Chord.NO_FLAVOUR
+
+    @staticmethod
+    def get_distance(root_note, key_tonic):
+        """Returns the distance between a root note and the tonic of a given major chord.
+        The result will always be greater or equal to zero. To achieve this an octave may
+        be added to the root_note."""
+        root_number = Chord.DISTANCE_TO_C[root_note]
+        key_number = Chord.DISTANCE_TO_C[key_tonic]
+        if root_number < key_number:
+            root_number += 12
+        distance = root_number - key_number
+        return distance
+
+    @staticmethod
+    def get_simplified_chord(an_accord, current_filname):  # static
+        """Returns a simplified chord representation of given maybe more complicated chord.
+        currently not used any more"""
+        if an_accord == Chord.SLASH:
+            return an_accord
+        chord_root = Chord.get_root(an_accord, current_filname)
+        if len(an_accord) == 1:
+            return chord_root
+        if len(chord_root) == 1:
+            chord_flavour = an_accord[1:]
+        else:
+            chord_flavour = an_accord[2:]
+
+        return chord_root + Chord.get_simplified_chord_flavour(chord_flavour, current_filname)
+
+    @staticmethod
+    def unit_test():
+        """ Performs a unit test"""
+        for number_of_accidents in range(-6, 6, 1):
+            song_key = ParseLeadSheetFile.get_kajor_key(number_of_accidents)
+            print("=================================")
+            print("Songs key:" + str(ParseLeadSheetFile.get_kajor_key(number_of_accidents)))
+            for chord in ("Cmaj7", "Dbm6", "D7b13", "Eb9", "E7#5", "Fsus9", "F#", "G79", "G#m6", "A7b9", "Bb9", "Bo"):
+                roman_representation = Chord.get_roman_number(chord, song_key, "none")
+                print(chord + " : " + roman_representation)
+        exit(0)
+
+
+class ParseLeadSheetFile:
+    """Class for parsing a file with changes in improvisor format.     """
+
+    # host variables for persisting the changes in a sql database0
+    ssri1l = None  # super simplified roman interpretation (oneliner)
+    sri1l = None  # simplified roman interpretation (oneliner)
+    sri = None  # simplified roman interpretation
+    changes = None  # original changes
+    major_key = None  # the major key representation f(number of accidentals)
+    composer = None  # composer's name
+    filename = None
+    title = None
+    titlelc = None  # lower case version of title for searching purposis
+    changeid = None  # surrogate key for database
+    first_chord = True  # True means: please check plausibility of given number of accidentals
+    number_of_accidentals = None
+    check_plausibility = False
+    start_letter = 'A'
+
+    KEYS = {0: "C", 1: "G", 2: "D", 3: "A", 4: "E", 5: "B", 6: "F#", 7: "C#",  # maps number of accidentals
+            -1: "F", -2: "Bb", -3: "Eb", -4: "Ab", -5: "Db", -6: "Gb", -7: "Cb"}  # to corresponding major key
+    NO_KEY_ERROR = "*NO-KEY-ERROR*"
+    NO_TITLE_GIVEN = "NONE"
+
+    song_key = NO_KEY_ERROR
+    new_measure = False
+    dbcnct = None  # sqlite3.connect(database name)
+    dbcsr = None  # dbcnct.cursor()
+
+    @staticmethod
+    def db_init(db_path, check=False, startletter='A'):
+        """ Create the database table if not already present, opens the table and connects a cursor object."""
+        ParseLeadSheetFile.check_plausibility = check
+        ParseLeadSheetFile.start_letter = startletter
+        ParseLeadSheetFile.dbcnct = sqlite3.connect(db_path)
+
+        sql_line = """
+        
+         CREATE TABLE IF NOT EXISTS jazz_changes 
+        (
+         changeid VARCHAR(40) PRIMARY KEY
+        ,filename Varchar(30)
+        ,title VARCHAR(30)
+        ,titlelc VARCHAR(30)
+        ,composer  VARCHAR(60)
+        ,major_key CHAR(2)
+        ,changes VARCHAR(2000)
+        ,sri VARCHAR(2000) 
+        ,sri1l VARCHAR(2000)
+        ,ssri1l VARCHAR (2000)
+        )
+        ;"""
+        ParseLeadSheetFile.dbcsr = ParseLeadSheetFile.dbcnct.cursor()
+        ParseLeadSheetFile.dbcsr.execute(sql_line)
+        ParseLeadSheetFile.dbcnct.commit()
+
+    @staticmethod
+    def parse_file(filename, roman_line_ending=""):
+        """ Parses the file containing the changes and outputs it into a file and a database table.
+        :param filename:
+        :param roman_line_ending:
+        :return:
+        """
+        ParseLeadSheetFile.filename = filename
+        number_of_titles_found = 0
+        number_of_composers_found = 0
+        number_of_keys_found = 0
+        chord_switch = False  # determines whether parsing the lead sheet has reached the chord section
+        ls_header = list()
+        ls_chords = list()
+        roman_numeral_interpretations = list()
+        roman_numeral_interpretations_one_line = list()
+        roman_numeral_interpretations_simplified = list()
+        check_part_end = False
+        ParseLeadSheetFile.first_chord = True
+        with open(filename) as file_object:
+            lines = file_object.readlines()
+
+        for line in lines:
+            ls = line.strip()
+            if ls[0:6] == "(title":
+                if number_of_titles_found == 0:
+                    number_of_titles_found += 1
+                    current_title = ls.rstrip('\n')
+                    if current_title == "":
+                        print("-", end="")
+                        current_title = ParseLeadSheetFile.NO_TITLE_GIVEN
+                    ls_header.append(current_title)
+                    ParseLeadSheetFile.title = ParseLeadSheetFile.get_meta("title", current_title)
+                    ParseLeadSheetFile.titlelc = ParseLeadSheetFile.title.lower()
+
+            if ls[0:9] == "(composer":
+                if number_of_composers_found == 0:
+                    number_of_composers_found += 1
+                    ls_header.append(ls.rstrip('\n'))
+                    ParseLeadSheetFile.composer = ParseLeadSheetFile.get_meta("composer", ls.rstrip('\n'))
+            if ls[0:4] == "(key":
+                if number_of_keys_found == 0:
+                    number_of_keys_found += 1
+                    key_parts = ls.split()
+                    number_string = key_parts[1][0:2]
+                    if number_string[1] == ")":
+                        ParseLeadSheetFile.number_of_accidentals = int(number_string[0])
+                    else:
+                        ParseLeadSheetFile.number_of_accidentals = int(number_string)
+                    # treat the whole song as in one key
+                    ParseLeadSheetFile.song_key = ParseLeadSheetFile.get_kajor_key(
+                        ParseLeadSheetFile.number_of_accidentals)
+                    ls_header.append("(key(accidental): " + ParseLeadSheetFile.song_key
+                                     + " - always interpreted as major)\n")
+                    ParseLeadSheetFile.major_key = ParseLeadSheetFile.song_key
+            # ParseLeadSheetFile.get_key(number_of_accidentals)
+            if ls[0:7] == "(phrase" or ls[0:8] == "(section":
+                chord_switch = True
+
+            if ls[0:13] == "(type chords)":
+                #  not always a chord section begins with section or phrase: so try to detect the begin of
+                #  the chord section, though
+                check_part_end = True
+            if check_part_end:
+                if ls == ")":  # could be the end of a part section - after that the chords should start
+                    # not always a chord section begins with section or phrase: so try to detect the begin of
+                    # the chord section, though
+                    chord_switch = True
+
+            if chord_switch:
+                if len(ls) > 2:
+                    if ls[0] == "(":
+                        pass
+                    else:
+                        if len(ls) > 0:
+                            ls_chords.append(ls + "\n")  # chords should always appear as in source,
+                            # whereas the the roman numeric interpretation should be in one line
+                            # or behaviour depends on a switch
+            if ls[0:13] == "(type melody)":
+                break  # after the melody section no chords are expected anymore
+        ParseLeadSheetFile.changes = ''.join(map(str, ls_chords))  # convert changes list to string
+        # roman_numeral_interpretations.append("-------------------------------------------\n")
+        if len(ls_chords) == 0:
+            print("no Chords detected in " + filename)
+
+        for chord_line in ls_chords:  # iterate over the original changes
+            # one line of roman numeral interpretation
+            current_line = ParseLeadSheetFile.parse_chord_line(chord_line, ParseLeadSheetFile.song_key, filename)
+            roman_numeral_interpretations.append(current_line + roman_line_ending)  # add the current line to the list
+            roman_numeral_interpretations_one_line.append(current_line)
+            simplified_line = ParseLeadSheetFile.honor_only_first_chord_in_measure(current_line)
+            roman_numeral_interpretations_simplified.append(simplified_line)
+        # return complete song as one list
+
+        ParseLeadSheetFile.sri = ''.join(map(str, roman_numeral_interpretations))
+        ParseLeadSheetFile.sri1l = ''.join(map(str, roman_numeral_interpretations_one_line))
+        ParseLeadSheetFile.ssri1l = ''.join(map(str, roman_numeral_interpretations_simplified))
+        ParseLeadSheetFile.filename = filename
+        ParseLeadSheetFile.insert_lead_sheet()
+
+        roman_numeral_interpretations.append("-------------------------------------------\n")
+        roman_numeral_interpretations_one_line.append('\n')
+        return ls_header + ls_chords + roman_numeral_interpretations + roman_numeral_interpretations_one_line \
+               + roman_numeral_interpretations_simplified
+
+    @staticmethod
+    def commit():
+        """Database commit"""
+        ParseLeadSheetFile.dbcnct.commit()
+
+    @staticmethod
+    def close():
+        """Closes connection to the database"""
+        ParseLeadSheetFile.dbcnct.close()
+
+    @staticmethod
+    def get_kajor_key(n_accidentals):
+        """ Returns the key for a given number of accidentals. No attempt will be made to distinguish
+        between modes; it will always return the major representation."""
+        key = ParseLeadSheetFile.KEYS[n_accidentals]
+        return key
+
+    @staticmethod
+    def insert_lead_sheet():
+        """Inserts the leadsheet interpretation into a database table."""
+        ParseLeadSheetFile.changeid = str(uuid.uuid4())
+        ParseLeadSheetFile.dbcsr.execute(""" INSERT INTO jazz_changes VALUES( ?, ?, ?, ?, ?, ?, ?, ?, ?,?) """,
+                                         (
+                                             ParseLeadSheetFile.changeid,
+                                             ParseLeadSheetFile.filename,
+                                             ParseLeadSheetFile.title,
+                                             ParseLeadSheetFile.titlelc,
+                                             ParseLeadSheetFile.composer,
+                                             ParseLeadSheetFile.major_key,
+                                             ParseLeadSheetFile.changes,
+                                             ParseLeadSheetFile.sri,
+                                             ParseLeadSheetFile.sri1l,
+                                             ParseLeadSheetFile.ssri1l,
+                                         )
+                                         )
+
+    @staticmethod
+    def get_meta(what, a_meta):
+        """ Returns the metadata from a tag line.
+        Example: tag line (a_meta) is "(composer Thomas "Fats" Waller)"
+        what = title
+        RETURNS: Thomas "Fats" Waller
+        """
+        meta_start = len(what) + 2
+        meta_end = len(a_meta) - 1
+        temp = a_meta[meta_start:meta_end]
+        return temp
+
+    @staticmethod
+    def honor_only_first_chord_in_measure(a_chord_line):
+        """Takes a chord line with several measures and returns only first chord of every measure.
+        The result gets returned in a string."""
+        first_chords = ""
+        for measure in a_chord_line.split("|"):
+            a_list = measure.split()
+            if a_list.__len__() > 0:
+                first_chords += a_list[0] + " | "
+        return first_chords
+
+    @staticmethod
+    def parse_chord_line(chord_line, song_key, filename):
+        """Returns the roman numeral interpretation of on line of chords form lead sheet.
+        In one measure a chord will be skipped if the preceding chord is identical to the current."""
+
+        roman_line = ""
+        chord_line_parts = chord_line.split()
+
+        for part in chord_line_parts:
+            if part == "|":
+                roman_line += " " + part
+                ParseLeadSheetFile.new_measure = True
+            elif part == Chord.SLASH:
+                if ParseLeadSheetFile.new_measure:
+                    roman_line += " " + Chord.last_chord
+                else:
+                    ParseLeadSheetFile.new_measure = False
+                    # don't output the last chord again
+            else:
+                roman_numeric_interpretation = Chord.get_roman_number(part, song_key, filename)
+                if ParseLeadSheetFile.first_chord:
+                    ParseLeadSheetFile.plausibility_check(ParseLeadSheetFile.number_of_accidentals,
+                                                          roman_numeric_interpretation)
+                    ParseLeadSheetFile.first_chord = False
+                if ParseLeadSheetFile.new_measure:
+                    if roman_line == "":
+                        roman_line = roman_numeric_interpretation
+                    else:
+                        roman_line += " " + roman_numeric_interpretation
+                    ParseLeadSheetFile.new_measure = False
+                    Chord.last_chord = roman_numeric_interpretation
+                else:  # not new measure, only output if chord has changed
+                    if roman_numeric_interpretation == Chord.last_chord:
+                        pass  # don't output the last chord again
+                    else:
+                        Chord.last_chord = roman_numeric_interpretation
+                        if roman_line == "":
+                            roman_line = roman_numeric_interpretation
+                        else:
+                            roman_line += " " + roman_numeric_interpretation
+        return roman_line
+
+    @staticmethod
+    def plausibility_check(number_of_accidentals, roman_numeric_interpretation):
+        if ParseLeadSheetFile.check_plausibility  and  os.path.basename(ParseLeadSheetFile.filename)[0].upper() > ParseLeadSheetFile.start_letter:
+            if roman_numeric_interpretation[0] == "I" or roman_numeric_interpretation.startswith("VIm") \
+                    or roman_numeric_interpretation.startswith("VIdim") or roman_numeric_interpretation == "NC" \
+                    or roman_numeric_interpretation.startswith("IIIdim") or roman_numeric_interpretation.startswith(
+                "Vdim"):
+                # if NoChord we can't check for plausibility
+                # may be mb5 that will be mapped as dim here or roman_numeric_interpretation == "NC":
+                pass  # plausibility check passed
+            else:
+                editor = os.environ.get('EDITOR', 'notepad')
+                call([editor, ParseLeadSheetFile.filename])
+                print(ParseLeadSheetFile.filename, str(number_of_accidentals), roman_numeric_interpretation)
+        else:
+            print(ParseLeadSheetFile.filename[0] +":" + ParseLeadSheetFile.start_letter)
+            pass  # perform no check
+
+
+# --------------------------------------------------------------------------------- #
+if __name__ == '__main__':
+    # Chord.unit_test()
+
+    f = open(".//allChanges.txt", "w")
+    ParseLeadSheetFile.db_init("f:/pythonProject/M21/jazz_changes.db", True, 'I') #  skip plausibility check until filename > I*
+    changes = glob.glob("C://Users//JR//impro-visor-version-10.2-files//leadsheets//changes//*.ls")
+    for ls_file in changes:
+        print("o:" + ls_file)
+        interpretation = ParseLeadSheetFile.parse_file(ls_file, "\n")
+        for element in interpretation:
+            f.write(element)
+        f.write("\n")
+        f.write("\n")
+    f.close()
+    ParseLeadSheetFile.dbcnct.commit()
+    ParseLeadSheetFile.dbcnct.close()
