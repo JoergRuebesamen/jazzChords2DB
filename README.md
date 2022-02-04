@@ -16,7 +16,7 @@
  plausibility check is called and if it's not obvious that the nuber of accidentals are correct,
  an editor is called with the current song loaded, giving the option to edit this info. But the changes will not effect before the next run.
  Currently the next run stores the song a second time, there is no update implemented. So it may be a good idea to delete the chord database before running a second time.
- TODO: I should add an option to skip the plausibilit check, at the time beeing you would have to comment this line out:
+ There is option to skip the plausibilit check and one to skip until the filename starts with a letter greater than a given reference letter. This is because you'll unlikely edit all changes in doubt at a time.
  
  ParseLeadSheetFile.check_plausibility(ParseLeadSheetFile.number_of_accidentals,
                                                           roman_numeric_interpretation)
