@@ -3,7 +3,9 @@
 # This way scores get independent from key signature and comparable.
 # Slash idler get replaced by the preceding chord.
 # Repeated chords in one measure get skipped.
-# Sadly the info number of accidentals is not filled reliably
+# Sadly the info number of accidentals is not filled reliably.
+
+# source: imaginaryBookAndOtherLeadsheats.zip (see https://sourceforge.net/projects/impro-visor/files/)
 
 # quite good examples:
 # Ladybird - Half Nelson
@@ -234,6 +236,7 @@ class ParseLeadSheetFile:
     def db_init(db_path, check=False, startletter='A'):
         """ Create the database table if not already present, opens the table and connects a cursor object."""
         ParseLeadSheetFile.check_plausibility = check
+        print("plausibility check:", check)
         ParseLeadSheetFile.start_letter = startletter
         ParseLeadSheetFile.dbcnct = sqlite3.connect(db_path)
 
@@ -360,7 +363,7 @@ class ParseLeadSheetFile:
         roman_numeral_interpretations.append("-------------------------------------------\n")
         roman_numeral_interpretations_one_line.append('\n')
         return ls_header + ls_chords + roman_numeral_interpretations + roman_numeral_interpretations_one_line \
-               + roman_numeral_interpretations_simplified
+            + roman_numeral_interpretations_simplified
 
     @staticmethod
     def commit():
@@ -442,8 +445,7 @@ class ParseLeadSheetFile:
             else:
                 roman_numeric_interpretation = Chord.get_roman_number(part, song_key, filename)
                 if ParseLeadSheetFile.first_chord:
-                    ParseLeadSheetFile.plausibility_check(ParseLeadSheetFile.number_of_accidentals,
-                                                          roman_numeric_interpretation)
+                    ParseLeadSheetFile.plausibility_check(roman_numeric_interpretation)
                     ParseLeadSheetFile.first_chord = False
                 if ParseLeadSheetFile.new_measure:
                     if roman_line == "":
@@ -464,21 +466,27 @@ class ParseLeadSheetFile:
         return roman_line
 
     @staticmethod
-    def plausibility_check(number_of_accidentals, roman_numeric_interpretation):
-        if ParseLeadSheetFile.check_plausibility  and  os.path.basename(ParseLeadSheetFile.filename)[0].upper() > ParseLeadSheetFile.start_letter:
+    def plausibility_check(roman_numeric_interpretation):
+        """Check the plausibility of the given number of accidentals.
+
+        If the tonality isn't known, the transformation to the roman numerical can't be successful. So you get the
+        option, to fix that. This is not always an easy task, some modern songs come without any sign and the
+        tonality maybe changes frequently.
+        Here is only a humble and imperfect try to check, whether the given tonality might be correct. Nothing is sure here.
+          """
+        if ParseLeadSheetFile.check_plausibility and os.path.basename(ParseLeadSheetFile.filename)[0].upper() > ParseLeadSheetFile.start_letter:
             if roman_numeric_interpretation[0] == "I" or roman_numeric_interpretation.startswith("VIm") \
                     or roman_numeric_interpretation.startswith("VIdim") or roman_numeric_interpretation == "NC" \
-                    or roman_numeric_interpretation.startswith("IIIdim") or roman_numeric_interpretation.startswith(
-                "Vdim"):
+                    or roman_numeric_interpretation.startswith("IIIdim") or roman_numeric_interpretation.startswith("Vdim"):
                 # if NoChord we can't check for plausibility
                 # may be mb5 that will be mapped as dim here or roman_numeric_interpretation == "NC":
                 pass  # plausibility check passed
             else:
                 editor = os.environ.get('EDITOR', 'notepad')
                 call([editor, ParseLeadSheetFile.filename])
-                print(ParseLeadSheetFile.filename, str(number_of_accidentals), roman_numeric_interpretation)
+                # print(ParseLeadSheetFile.filename, str(number_of_accidentals), roman_numeric_interpretation)
         else:
-            print(ParseLeadSheetFile.filename[0] +":" + ParseLeadSheetFile.start_letter)
+            # print(ParseLeadSheetFile.filename[0] +":" + ParseLeadSheetFile.start_letter)
             pass  # perform no check
 
 
@@ -486,8 +494,10 @@ class ParseLeadSheetFile:
 if __name__ == '__main__':
     # Chord.unit_test()
 
-    f = open(".//allChanges.txt", "w")
-    ParseLeadSheetFile.db_init("f:/pythonProject/M21/jazz_changes.db", True, 'I') #  skip plausibility check until filename > I*
+    # f = open(".//allChanges.txt", "w")
+    f = open(".//kannweg.txt", "w")  # everything that is going to be inserted into to the database will alsi be written to this file.
+    ParseLeadSheetFile.db_init("f:/pythonProject/M21/kannweg.db", False, 'M') # do not check plausibility
+    #    ParseLeadSheetFile.db_init("f:/pythonProject/M21/jazz_changes.db", False, 'I')
     changes = glob.glob("C://Users//JR//impro-visor-version-10.2-files//leadsheets//changes//*.ls")
     for ls_file in changes:
         print("o:" + ls_file)
