@@ -8,6 +8,8 @@
  Input is currently a directory with community maintained lead sheets in IMPROVISOR's ls format.
  see https://www.cs.hmc.edu/~keller/jazz/improvisor/
  There are roughly tree thousand songs at the moment.
+ You can build up this directory by unzipping imaginaryBookAndOtherLeadsheats.zip 
+ (see https://sourceforge.net/projects/impro-visor/files/).
 
  Slash idler get replaced by the preceding chord.
  Repeated chords in one measure get skipped.
